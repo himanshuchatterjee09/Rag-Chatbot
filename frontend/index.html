@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Initiatives Chatbot</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <span class="logo-icon">⚡</span>
+          <span class="logo-text">AI Initiatives</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <p class="nav-label">Quick Queries</p>
+        <button class="nav-btn" data-query="What is the overall status of all AI initiatives?">
+          📊 All Initiatives Status
+        </button>
+        <button class="nav-btn" data-query="Which initiatives are currently active?">
+          ✅ Active Initiatives
+        </button>
+        <button class="nav-btn" data-query="Show me initiatives by department">
+          🏢 By Department
+        </button>
+        <button class="nav-btn" data-query="What is our AI adoption maturity score?">
+          🎯 AI Maturity Score
+        </button>
+        <button class="nav-btn" data-query="Which initiatives are at risk or on hold?">
+          ⚠️ At Risk / On Hold
+        </button>
+        <button class="nav-btn" data-query="Give me an executive summary of our AI strategy">
+          📋 Executive Summary
+        </button>
+      </nav>
+
+      <div class="sidebar-stats" id="sidebarStats">
+        <p class="nav-label">Dashboard</p>
+        <div class="stat-item"><span class="stat-label">Total Initiatives</span><span class="stat-value" id="statTotal">–</span></div>
+        <div class="stat-item"><span class="stat-label">Active</span><span class="stat-value active" id="statActive">–</span></div>
+        <div class="stat-item"><span class="stat-label">Completed</span><span class="stat-value completed" id="statCompleted">–</span></div>
+        <div class="stat-item"><span class="stat-label">Avg Progress</span><span class="stat-value" id="statProgress">–</span></div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <header class="topbar">
+        <h1 class="topbar-title">AI Initiatives Chatbot</h1>
+        <div class="topbar-actions">
+          <label class="stream-toggle">
+            <input type="checkbox" id="streamToggle" checked />
+            <span>Stream</span>
+          </label>
+          <button class="btn-icon" id="clearBtn" title="Clear chat">🗑</button>
+        </div>
+      </header>
+
+      <div class="chat-area" id="chatArea">
+        <!-- Welcome state -->
+        <div class="welcome" id="welcome">
+          <div class="welcome-icon">🤖</div>
+          <h2>How can I help you today?</h2>
+          <p>Ask me anything about your company's AI initiatives, project statuses, budgets, owners, or AI adoption maturity.</p>
+          <div class="suggestions">
+            <button class="suggestion" data-query="How many AI initiatives do we have in total?">How many AI initiatives do we have?</button>
+            <button class="suggestion" data-query="What are the top priority AI initiatives?">What are our top priority initiatives?</button>
+            <button class="suggestion" data-query="What is the AI adoption maturity level for Data?">What is our Data maturity level?</button>
+            <button class="suggestion" data-query="Which department has the most AI initiatives?">Which department leads in AI?</button>
+          </div>
+        </div>
+
+        <!-- Messages injected here -->
+        <div class="messages" id="messages"></div>
+      </div>
+
+      <div class="input-area">
+        <div class="input-wrapper">
+          <textarea
+            id="queryInput"
+            placeholder="Ask about AI initiatives, status, budgets, maturity scores…"
+            rows="1"
+          ></textarea>
+          <button class="send-btn" id="sendBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+        <p class="input-hint">Powered by Azure OpenAI GPT-4o · Azure AI Search · Azure SQL</p>
+      </div>
+    </main>
+  </div>
+
+  <!-- Source modal -->
+  <div class="modal-overlay" id="modalOverlay" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Source Details</h3>
+        <button class="modal-close" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

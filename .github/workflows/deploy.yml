@@ -1,0 +1,111 @@
+name: Deploy to Azure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      recreate_infra:
+        description: 'Re-deploy Bicep infrastructure'
+        type: boolean
+        default: false
+
+env:
+  AZURE_RESOURCE_GROUP: rg-rag-chatbot
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  IMAGE_NAME: rag-chatbot-backend
+  CONTAINER_APP_NAME: ca-ragchatbot
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: ACR login
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build & push
+        run: |
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }} ./backend
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.tag }}
+
+  deploy-infra:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event.inputs.recreate_infra == 'true' || github.run_number == 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Bicep
+        uses: azure/arm-deploy@v2
+        with:
+          resourceGroupName: ${{ env.AZURE_RESOURCE_GROUP }}
+          template: ./infra/main.bicep
+          parameters: >
+            sqlAdminPassword=${{ secrets.SQL_ADMIN_PASSWORD }}
+
+  deploy-app:
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-infra]
+    if: always() && needs.build-and-push.result == 'success'
+
+    steps:
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Update Container App image
+        run: |
+          az containerapp update \
+            --name ${{ env.CONTAINER_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --image ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }}
+
+  sync-search:
+    runs-on: ubuntu-latest
+    needs: deploy-app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt python-dotenv
+
+      - name: Run SQL → Search sync
+        env:
+          AZURE_OPENAI_ENDPOINT:            ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY:             ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_CHAT_DEPLOYMENT:     gpt-4o
+          AZURE_OPENAI_EMBEDDING_DEPLOYMENT: text-embedding-3-small
+          AZURE_SEARCH_ENDPOINT:            ${{ secrets.AZURE_SEARCH_ENDPOINT }}
+          AZURE_SEARCH_API_KEY:             ${{ secrets.AZURE_SEARCH_API_KEY }}
+          AZURE_SQL_SERVER:                 ${{ secrets.AZURE_SQL_SERVER }}
+          AZURE_SQL_DATABASE:               ai-initiatives-db
+          AZURE_SQL_USERNAME:               sqladmin
+          AZURE_SQL_PASSWORD:               ${{ secrets.SQL_ADMIN_PASSWORD }}
+        run: python ingestion/sql_to_search.py --table all
