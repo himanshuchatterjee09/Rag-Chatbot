@@ -28,13 +28,21 @@ class SQLService:
         return self._pool
 
     async def fetch_all(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, params)
-                columns = [col[0] for col in cur.description]
-                rows = await cur.fetchall()
-                return [dict(zip(columns, row)) for row in rows]
+        for attempt in range(2):
+            try:
+                pool = await self._get_pool()
+                async with pool.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(sql, params)
+                        columns = [col[0] for col in cur.description]
+                        rows = await cur.fetchall()
+                        return [dict(zip(columns, row)) for row in rows]
+            except Exception as exc:
+                if attempt == 0 and self._pool is not None:
+                    self._pool.close()
+                    self._pool = None
+                else:
+                    raise
 
     async def fetch_one(self, sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
         results = await self.fetch_all(sql, params)
@@ -61,42 +69,43 @@ class SQLService:
             await self._pool.wait_closed()
 
     async def get_schema_context(self) -> str:
-        return """
+        from datetime import date
+        today = date.today().strftime("%Y-%m-%d")
+        return f"""
 Tables in the database:
 
-1. company_profile
-   Columns: id, company_name, industry, employee_count, headquarters,
-            strategic_focus, ai_vision, last_updated
+1. portfolios
+   Columns: id, portfolio, portfolio_lead, uk_lead, ai_scout
+   Description: AI portfolio areas and their leads. ai_scout is an email address.
 
 2. ai_initiatives
-   Columns: initiative_id, initiative_name, status[Active/Completed/Planned/On Hold],
-            owner, department, budget_allocated, budget_spent, start_date,
-            target_end_date, actual_end_date, priority[High/Medium/Low],
-            description, objectives, kpis, progress_percentage, risks,
-            last_updated, created_at
-
-3. ai_adoption_index
-   Columns: id, dimension, sub_dimension, current_score(1-5), target_score(1-5),
-            maturity_level[Initial/Developing/Defined/Managed/Optimizing],
-            benchmark_score, gap_analysis, recommendations,
-            assessment_date, assessor, notes
+   Columns: item_id, initiative_name, portfolio_team, owner, last_updated, stage, confirmed_scout
+   stage values: Proposed, Live, PoC/Pilot, On Hold, Completed, Blocked, In Progress, Reframed, Stopped
+   portfolio_team references the portfolio column in the portfolios table.
+   owner can contain multiple names separated by commas.
+   last_updated is stored as YYYY-MM text (e.g. '2026-04' = April 2026, '2024-10' = October 2024).
+   Use plain string comparison for date filters: last_updated < '2026-04-01' or last_updated >= '2025-10-01'.
+   Empty string means no date recorded.
+   Today's date is {today}.
 """
 
     async def get_initiatives_summary(self) -> Dict[str, Any]:
         totals = await self.fetch_one("""
             SELECT
                 COUNT(*) AS total,
-                SUM(CASE WHEN status='Active'    THEN 1 ELSE 0 END) AS active,
-                SUM(CASE WHEN status='Completed' THEN 1 ELSE 0 END) AS completed,
-                SUM(CASE WHEN status='Planned'   THEN 1 ELSE 0 END) AS planned,
-                SUM(CASE WHEN status='On Hold'   THEN 1 ELSE 0 END) AS on_hold,
-                AVG(CAST(progress_percentage AS FLOAT))              AS avg_progress
+                SUM(CASE WHEN stage='Live'        THEN 1 ELSE 0 END) AS live,
+                SUM(CASE WHEN stage='Completed'   THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN stage='Proposed'    THEN 1 ELSE 0 END) AS proposed,
+                SUM(CASE WHEN stage='On Hold'     THEN 1 ELSE 0 END) AS on_hold,
+                SUM(CASE WHEN stage='In Progress' THEN 1 ELSE 0 END) AS in_progress,
+                SUM(CASE WHEN stage='PoC/Pilot'   THEN 1 ELSE 0 END) AS poc_pilot,
+                SUM(CASE WHEN stage='Blocked'     THEN 1 ELSE 0 END) AS blocked
             FROM ai_initiatives
         """)
-        by_dept = await self.fetch_all("""
-            SELECT department, COUNT(*) AS count
+        by_portfolio = await self.fetch_all("""
+            SELECT portfolio_team, COUNT(*) AS count
             FROM   ai_initiatives
-            GROUP  BY department
+            GROUP  BY portfolio_team
             ORDER  BY count DESC
         """)
-        return {"totals": totals, "by_department": by_dept}
+        return {"totals": totals, "by_portfolio": by_portfolio}

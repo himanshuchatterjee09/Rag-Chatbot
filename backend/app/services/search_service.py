@@ -56,8 +56,8 @@ class SearchService:
             SimpleField(name="record_id", type=SearchFieldDataType.String, filterable=True),
             SearchableField(name="title", type=SearchFieldDataType.String),
             SearchableField(name="content", type=SearchFieldDataType.String),
-            SimpleField(name="department", type=SearchFieldDataType.String, filterable=True, facetable=True),
-            SimpleField(name="status", type=SearchFieldDataType.String, filterable=True, facetable=True),
+            SimpleField(name="portfolio_team", type=SearchFieldDataType.String, filterable=True, facetable=True),
+            SimpleField(name="stage", type=SearchFieldDataType.String, filterable=True, facetable=True),
             SimpleField(name="owner", type=SearchFieldDataType.String, filterable=True),
             SearchField(
                 name="content_vector",
@@ -109,7 +109,7 @@ class SearchService:
                     )
                 ],
                 filter=filter_expr,
-                select=["id", "content", "source_table", "record_id", "department", "status", "title"],
+                select=["id", "content", "source_table", "record_id", "portfolio_team", "stage", "title"],
                 top=top,
                 query_type="semantic",
                 semantic_configuration_name="default",
@@ -124,8 +124,8 @@ class SearchService:
                         record_id=r.get("record_id"),
                         metadata={
                             "title": r.get("title"),
-                            "department": r.get("department"),
-                            "status": r.get("status"),
+                            "portfolio_team": r.get("portfolio_team"),
+                            "stage": r.get("stage"),
                         },
                     )
                 )
@@ -152,66 +152,40 @@ class SearchService:
             for r in rows:
                 content = (
                     f"Initiative: {r['initiative_name']}. "
-                    f"Status: {r['status']}. Department: {r['department']}. "
-                    f"Owner: {r['owner']}. Priority: {r['priority']}. "
-                    f"Progress: {r.get('progress_percentage', 'N/A')}%. "
-                    f"Description: {r.get('description') or ''}. "
-                    f"Objectives: {r.get('objectives') or ''}. "
-                    f"KPIs: {r.get('kpis') or ''}. "
-                    f"Risks: {r.get('risks') or ''}."
+                    f"Stage: {r.get('stage') or ''}. "
+                    f"Portfolio/Team: {r.get('portfolio_team') or ''}. "
+                    f"Owner: {r.get('owner') or ''}. "
+                    f"Last Updated: {r.get('last_updated') or ''}."
                 )
                 docs.append({
-                    "id": f"initiative-{r['initiative_id']}",
+                    "id": f"initiative-{r['item_id']}",
                     "source_table": "ai_initiatives",
-                    "record_id": str(r["initiative_id"]),
+                    "record_id": str(r["item_id"]),
                     "title": r["initiative_name"],
                     "content": content,
-                    "department": r.get("department") or "",
-                    "status": r.get("status") or "",
+                    "portfolio_team": r.get("portfolio_team") or "",
+                    "stage": r.get("stage") or "",
                     "owner": r.get("owner") or "",
                 })
 
-        if table in ("all", "ai_adoption_index"):
-            rows = await sql_service.fetch_all("SELECT * FROM ai_adoption_index")
+        if table in ("all", "portfolios"):
+            rows = await sql_service.fetch_all("SELECT * FROM portfolios")
             for r in rows:
                 content = (
-                    f"AI Adoption Dimension: {r['dimension']}. "
-                    f"Sub-dimension: {r.get('sub_dimension') or 'N/A'}. "
-                    f"Current Score: {r['current_score']}/5. "
-                    f"Maturity Level: {r['maturity_level']}. "
-                    f"Gap Analysis: {r.get('gap_analysis') or ''}. "
-                    f"Recommendations: {r.get('recommendations') or ''}."
+                    f"Portfolio: {r['portfolio']}. "
+                    f"Portfolio Lead: {r.get('portfolio_lead') or ''}. "
+                    f"UK Lead: {r.get('uk_lead') or ''}. "
+                    f"AI Scout: {r.get('ai_scout') or ''}."
                 )
                 docs.append({
-                    "id": f"adoption-{r['id']}",
-                    "source_table": "ai_adoption_index",
+                    "id": f"portfolio-{r['id']}",
+                    "source_table": "portfolios",
                     "record_id": str(r["id"]),
-                    "title": f"{r['dimension']} – {r.get('sub_dimension') or ''}",
+                    "title": r["portfolio"],
                     "content": content,
-                    "department": "",
-                    "status": r.get("maturity_level") or "",
-                    "owner": r.get("assessor") or "",
-                })
-
-        if table in ("all", "company_profile"):
-            rows = await sql_service.fetch_all("SELECT * FROM company_profile")
-            for r in rows:
-                content = (
-                    f"Company: {r['company_name']}. Industry: {r['industry']}. "
-                    f"Employees: {r.get('employee_count') or 'N/A'}. "
-                    f"Headquarters: {r.get('headquarters') or 'N/A'}. "
-                    f"Strategic Focus: {r.get('strategic_focus') or ''}. "
-                    f"AI Vision: {r.get('ai_vision') or ''}."
-                )
-                docs.append({
-                    "id": f"company-{r['id']}",
-                    "source_table": "company_profile",
-                    "record_id": str(r["id"]),
-                    "title": r["company_name"],
-                    "content": content,
-                    "department": "",
-                    "status": "",
-                    "owner": "",
+                    "portfolio_team": r.get("portfolio") or "",
+                    "stage": "",
+                    "owner": r.get("portfolio_lead") or "",
                 })
 
         if not docs:

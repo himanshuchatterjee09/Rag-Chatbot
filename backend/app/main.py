@@ -94,20 +94,28 @@ async def initiatives_summary():
     return await app.state.sql.get_initiatives_summary()
 
 
-@app.get("/api/initiatives/departments")
-async def departments():
+@app.get("/api/initiatives/portfolios")
+async def portfolios():
     rows = await app.state.sql.fetch_all(
-        "SELECT DISTINCT department FROM ai_initiatives ORDER BY department"
+        "SELECT DISTINCT portfolio_team FROM ai_initiatives "
+        "WHERE portfolio_team IS NOT NULL ORDER BY portfolio_team"
     )
-    return [r["department"] for r in rows]
+    return [r["portfolio_team"] for r in rows]
 
 
-@app.get("/api/adoption/dimensions")
-async def adoption_dimensions():
+@app.get("/api/initiatives/stages")
+async def stages():
+    rows = await app.state.sql.fetch_all(
+        "SELECT stage, COUNT(*) AS count FROM ai_initiatives "
+        "WHERE stage IS NOT NULL GROUP BY stage ORDER BY count DESC"
+    )
+    return rows
+
+
+@app.get("/api/portfolios")
+async def portfolio_leads():
     return await app.state.sql.fetch_all(
-        "SELECT dimension, AVG(current_score) AS avg_score, "
-        "MIN(maturity_level) AS min_level "
-        "FROM ai_adoption_index GROUP BY dimension ORDER BY dimension"
+        "SELECT portfolio, portfolio_lead, uk_lead, ai_scout FROM portfolios ORDER BY portfolio"
     )
 
 

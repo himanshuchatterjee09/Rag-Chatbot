@@ -3,9 +3,8 @@ CLI: Load Excel files into Azure SQL.
 
 Usage:
   python ingestion/excel_to_sql.py \
-    --company  data/company_profile.xlsx \
-    --initiatives data/ai_initiatives.xlsx \
-    --adoption data/ai_adoption_index.xlsx
+    --portfolio   data/AIPortfolio.xlsx \
+    --initiatives data/AIInitiatives.xlsx
 """
 import argparse
 import asyncio
@@ -26,9 +25,8 @@ async def main(args: argparse.Namespace):
     svc = ExcelIngestionService(settings)
 
     results = await svc.ingest_all(
-        company_profile_path=args.company,
-        ai_initiatives_path=args.initiatives,
-        ai_adoption_path=args.adoption,
+        portfolio_path=args.portfolio,
+        initiatives_path=args.initiatives,
     )
 
     for table, count in results.items():
@@ -39,12 +37,11 @@ async def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load Excel data into Azure SQL")
-    parser.add_argument("--company",      help="Path to company_profile.xlsx")
-    parser.add_argument("--initiatives",  help="Path to ai_initiatives.xlsx")
-    parser.add_argument("--adoption",     help="Path to ai_adoption_index.xlsx")
+    parser.add_argument("--portfolio",    help="Path to AIPortfolio.xlsx")
+    parser.add_argument("--initiatives",  help="Path to AIInitiatives.xlsx")
     parsed = parser.parse_args()
 
-    if not any([parsed.company, parsed.initiatives, parsed.adoption]):
+    if not any([parsed.portfolio, parsed.initiatives]):
         parser.error("Provide at least one Excel file path.")
 
     asyncio.run(main(parsed))

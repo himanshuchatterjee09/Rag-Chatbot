@@ -26,7 +26,7 @@ class IntentRouter:
 
         if intent in (IntentType.LOOKUP, IntentType.ANALYTICS):
             schema = await self._sql.get_schema_context()
-            sql_query = await self._llm.generate_sql(question, schema)
+            sql_query = await self._llm.generate_sql(question, schema, history)
             try:
                 sql_rows = await self._sql.fetch_all(sql_query)
             except Exception as exc:
@@ -38,20 +38,14 @@ class IntentRouter:
         if intent == IntentType.SUMMARY and not sql_rows:
             try:
                 sql_rows = await self._sql.fetch_all("""
-                    SELECT 'initiatives' AS src, initiative_name AS name,
-                           status, department,
-                           CAST(progress_percentage AS NVARCHAR) AS progress
+                    SELECT initiative_name, portfolio_team, owner, stage, last_updated
                     FROM   ai_initiatives
-                    UNION ALL
-                    SELECT 'adoption', dimension, maturity_level,
-                           ISNULL(sub_dimension,''),
-                           CAST(current_score AS NVARCHAR)
-                    FROM   ai_adoption_index
+                    ORDER  BY last_updated DESC
                 """)
             except Exception:
                 pass
 
-        answer = await self._llm.synthesize(question, sources, sql_rows, history, intent)
+        answer = await self._llm.synthesize(question, sources, sql_rows, history, intent, sql_query)
 
         confidence = (
             0.9 if sql_rows and "error" not in (sql_rows[0] if sql_rows else {})
@@ -71,19 +65,42 @@ class IntentRouter:
         history = [m.model_dump() for m in (request.conversation_history or [])]
 
         intent = await self._llm.classify_intent(question)
+        print(f"\n[INTENT] {intent}")
+
         sources = []
         sql_rows = None
+        sql_query = None
 
+        # Run SQL for lookup/analytics/summary
         if intent in (IntentType.LOOKUP, IntentType.ANALYTICS):
             schema = await self._sql.get_schema_context()
-            sql_query = await self._llm.generate_sql(question, schema)
+            sql_query = await self._llm.generate_sql(question, schema, history)
+            print(f"[SQL] {sql_query}")
             try:
                 sql_rows = await self._sql.fetch_all(sql_query)
+                print(f"[ROWS] {len(sql_rows)} rows returned")
             except Exception as exc:
-                sql_rows = [{"error": str(exc)}]
+                print(f"[SQL ERROR] {exc}")
+                sql_rows = [{"error": str(exc), "generated_sql": sql_query}]
 
+        if intent == IntentType.SUMMARY:
+            try:
+                sql_rows = await self._sql.fetch_all("""
+                    SELECT initiative_name, portfolio_team, owner, stage, last_updated
+                    FROM   ai_initiatives
+                    ORDER  BY stage, portfolio_team
+                """)
+                print(f"[SUMMARY ROWS] {len(sql_rows)} rows returned")
+            except Exception as exc:
+                print(f"[SUMMARY ERROR] {exc}")
+
+        # Semantic search for semantic/summary intents
         if intent in (IntentType.SEMANTIC, IntentType.SUMMARY):
-            sources = await self._search.hybrid_search(question, top=5)
+            try:
+                sources = await self._search.hybrid_search(question, top=5)
+                print(f"[SEARCH] {len(sources)} results")
+            except Exception as exc:
+                print(f"[SEARCH ERROR] {exc}")
 
-        async for chunk in self._llm.synthesize_stream(question, sources, sql_rows, history):
+        async for chunk in self._llm.synthesize_stream(question, sources, sql_rows, history, sql_query):
             yield chunk
