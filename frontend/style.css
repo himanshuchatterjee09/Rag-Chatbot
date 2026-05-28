@@ -355,6 +355,21 @@ textarea::placeholder { color: var(--text-muted); }
 }
 .source-item .source-meta { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
 
+.source-sql, .source-rows, .source-error {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 8px 0 16px;
+  color: var(--text);
+}
+.source-error { border-color: var(--danger); color: var(--danger); }
+#modalBody h4 { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+
 /* ── Scrollbar ────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

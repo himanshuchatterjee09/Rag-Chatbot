@@ -106,31 +106,84 @@ async function streamQuery(question, textNode, cursor, bubble) {
   const dec    = new TextDecoder();
   let   full   = '';
 
+  let meta = null;
+  let buffer = '';
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
-    const lines = dec.decode(value).split('\n');
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
+    buffer += dec.decode(value, { stream: true });
+    // SSE messages are separated by blank lines (double newline)
+    const events = buffer.split('\n\n');
+    buffer = events.pop();  // keep the last (possibly incomplete) event
+
+    for (const event of events) {
+      const line = event.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
       const data = line.slice(6);
-      if (data === '[DONE]') break;
+      if (data === '[DONE]') continue;
       try {
-        const { chunk } = JSON.parse(data);
-        if (chunk) {
-          full += chunk;
+        const parsed = JSON.parse(data);
+        if (parsed.chunk) {
+          full += parsed.chunk;
           cursor.remove();
           textNode.innerHTML = renderMarkdown(full);
           textNode.appendChild(cursor);
           scrollBottom();
+        } else if (parsed.meta) {
+          meta = parsed.meta;
         }
-      } catch (_) {}
+      } catch (e) {
+        console.error('Failed to parse SSE event:', e, data.slice(0, 200));
+      }
     }
   }
 
   cursor.remove();
   textNode.innerHTML = renderMarkdown(full);
   history.push({ role: 'assistant', content: full });
+
+  if (meta) renderMeta(bubble, meta);
+}
+
+function renderMeta(bubble, meta) {
+  const metaEl = bubble.querySelector('.meta');
+  if (!metaEl) return;
+
+  if (meta.intent) {
+    const badge = document.createElement('span');
+    badge.className = 'intent-badge';
+    badge.textContent = meta.intent;
+    metaEl.appendChild(badge);
+  }
+  if (meta.sql_query) {
+    const btn = document.createElement('button');
+    btn.className = 'sources-btn';
+    btn.textContent = `SQL (${meta.row_count} row${meta.row_count === 1 ? '' : 's'})`;
+    btn.onclick = () => showSql(meta);
+    metaEl.appendChild(btn);
+  }
+  if (meta.sources && meta.sources.length) {
+    const btn = document.createElement('button');
+    btn.className = 'sources-btn';
+    btn.textContent = `${meta.sources.length} source${meta.sources.length > 1 ? 's' : ''}`;
+    btn.onclick = () => showSources(meta.sources);
+    metaEl.appendChild(btn);
+  }
+}
+
+function showSql(meta) {
+  const rowsHtml = meta.rows_preview && meta.rows_preview.length
+    ? `<h4>Result rows (${meta.row_count} total, showing first ${meta.rows_preview.length})</h4>
+       <pre class="source-rows">${escapeHtml(JSON.stringify(meta.rows_preview, null, 2))}</pre>`
+    : '<p>No rows returned.</p>';
+  modalBody.innerHTML = `
+    <h4>Generated SQL</h4>
+    <pre class="source-sql">${escapeHtml(meta.sql_query)}</pre>
+    ${meta.sql_error ? `<h4>Error</h4><pre class="source-error">${escapeHtml(meta.sql_error)}</pre>` : ''}
+    ${rowsHtml}
+  `;
+  modalOverlay.hidden = false;
 }
 
 async function standardQuery(question, textNode, cursor, bubble) {
@@ -224,13 +277,15 @@ function renderMarkdown(text) {
     .replace(/\*(.+?)\*/g,     '<em>$1</em>')
     .replace(/`([^`]+)`/g,     '<code>$1</code>');
 
-  // Tables
-  html = html.replace(/((?:\|.+\|\n)+)/g, match => {
-    const rows = match.trim().split('\n').filter(r => r.trim());
+  // Tables — match contiguous lines with at least one `|` and a separator line of dashes
+  html = html.replace(/(^[^\n]*\|[^\n]*\n[\s|:\-]+\n(?:[^\n]*\|[^\n]*\n?)+)/gm, match => {
+    const rows = match.trim().split('\n').filter(r => r.trim() && r.includes('|'));
     if (rows.length < 2) return match;
-    const toCell = (row, tag) =>
-      row.split('|').filter((_,i,a) => i>0 && i<a.length-1)
-         .map(c => `<${tag}>${c.trim()}</${tag}>`).join('');
+    const toCell = (row, tag) => {
+      // Strip leading/trailing `|` if present, then split
+      const trimmed = row.replace(/^\s*\|/, '').replace(/\|\s*$/, '');
+      return trimmed.split('|').map(c => `<${tag}>${c.trim()}</${tag}>`).join('');
+    };
     const head = `<tr>${toCell(rows[0], 'th')}</tr>`;
     const body = rows.slice(2).map(r => `<tr>${toCell(r, 'td')}</tr>`).join('');
     return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;

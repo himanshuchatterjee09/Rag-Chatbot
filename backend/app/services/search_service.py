@@ -16,18 +16,22 @@ from azure.search.documents.indexes.models import (
     VectorSearchProfile,
 )
 from azure.search.documents.models import VectorizedQuery
-from azure.core.credentials import AzureKeyCredential
 
 from ..config import Settings
 from ..models import SearchResult
+from ._aad_credential import HybridAsyncTokenCredential
 from .embedding_service import EmbeddingService
+from .external_view_service import ExternalViewService
 from .sql_service import SQLService
 
 
 class SearchService:
     def __init__(self, settings: Settings):
         self._settings = settings
-        self._cred = AzureKeyCredential(settings.azure_search_api_key)
+        # AAD auth via Managed Identity (in Azure) or az CLI (local dev).
+        # Requires "Search Index Data Contributor" + "Search Service Contributor"
+        # roles on the Search service for the principal.
+        self._cred = HybridAsyncTokenCredential()
         self._embeddings = EmbeddingService(settings)
 
     def _index_client(self) -> SearchIndexClient:
@@ -147,21 +151,35 @@ class SearchService:
 
         docs: list = []
 
-        if table in ("all", "ai_initiatives"):
-            rows = await sql_service.fetch_all("SELECT * FROM ai_initiatives")
+        if table in ("all", "ai_initiatives", "initiatives", "view"):
+            view = ExternalViewService(self._settings)
+            rows = await view.fetch_initiatives_aggregated()
             for r in rows:
-                content = (
-                    f"Initiative: {r['initiative_name']}. "
-                    f"Stage: {r.get('stage') or ''}. "
-                    f"Portfolio/Team: {r.get('portfolio_team') or ''}. "
-                    f"Owner: {r.get('owner') or ''}. "
-                    f"Last Updated: {r.get('last_updated') or ''}."
-                )
+                parts = [
+                    f"Initiative: {r.get('initiative_name') or ''}.",
+                    f"Stage: {r.get('stage') or ''}.",
+                    f"Portfolio: {r.get('portfolio_team') or ''}.",
+                ]
+                if r.get("sub_portfolio"):
+                    parts.append(f"Sub-Portfolio: {r['sub_portfolio']}.")
+                if r.get("owner"):
+                    parts.append(f"Participants: {r['owner']}.")
+                if r.get("description"):
+                    parts.append(f"Description: {r['description']}.")
+                if r.get("deliverable_type"):
+                    parts.append(f"Deliverable Type: {r['deliverable_type']}.")
+                if r.get("banking_domain"):
+                    parts.append(f"Banking Domain: {r['banking_domain']}.")
+                if r.get("impact"):
+                    parts.append(f"Impact: {r['impact']}.")
+                if r.get("last_updated"):
+                    parts.append(f"Last Updated: {r['last_updated']}.")
+                content = " ".join(parts)
                 docs.append({
                     "id": f"initiative-{r['item_id']}",
                     "source_table": "ai_initiatives",
                     "record_id": str(r["item_id"]),
-                    "title": r["initiative_name"],
+                    "title": r.get("initiative_name") or "",
                     "content": content,
                     "portfolio_team": r.get("portfolio_team") or "",
                     "stage": r.get("stage") or "",

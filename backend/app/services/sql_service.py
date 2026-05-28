@@ -1,60 +1,121 @@
+import asyncio
+import json
+import os
+import shutil
+import struct
+import subprocess
+import time
 from typing import Any, Dict, List, Optional
-import aioodbc
+import pyodbc
 from ..config import Settings
+
+_SQL_COPT_SS_ACCESS_TOKEN = 1256
+_RESOURCE = "https://database.windows.net/"
 
 
 class SQLService:
+    """Connects to the local Azure SQL DB using Managed Identity (in Azure)
+    or the local az CLI token (in dev). No SQL username/password used.
+
+    Note: aioodbc doesn't expose attrs_before reliably across versions, so we run
+    pyodbc synchronously in a thread-pool executor (the same pattern as the
+    external view service). Throughput is fine because queries are small.
+    """
+
     def __init__(self, settings: Settings):
         self._settings = settings
-        self._pool: Optional[aioodbc.Pool] = None
-
-    @property
-    def _conn_str(self) -> str:
-        s = self._settings
-        return (
-            f"DRIVER={{{s.azure_sql_driver}}};"
-            f"SERVER={s.azure_sql_server};"
-            f"DATABASE={s.azure_sql_database};"
-            f"UID={s.azure_sql_username};"
-            f"PWD={s.azure_sql_password};"
+        self._conn_str = (
+            f"DRIVER={{{settings.azure_sql_driver}}};"
+            f"SERVER={settings.azure_sql_server};"
+            f"DATABASE={settings.azure_sql_database};"
             "Encrypt=yes;TrustServerCertificate=no;"
         )
+        self._cached_token: Optional[str] = None
+        self._cached_expiry: float = 0.0
 
-    async def _get_pool(self) -> aioodbc.Pool:
-        if self._pool is None:
-            self._pool = await aioodbc.create_pool(
-                dsn=self._conn_str, minsize=1, maxsize=5
+    def _get_token(self) -> str:
+        if self._cached_token and time.time() < self._cached_expiry - 300:
+            return self._cached_token
+
+        # Azure-hosted: Managed Identity
+        if os.getenv("IDENTITY_ENDPOINT") or os.getenv("MSI_ENDPOINT") or os.getenv("CONTAINER_APP_NAME"):
+            try:
+                from azure.identity import ManagedIdentityCredential
+                cred = ManagedIdentityCredential()
+                tok = cred.get_token(_RESOURCE + ".default")
+                self._cached_token = tok.token
+                self._cached_expiry = tok.expires_on
+                return self._cached_token
+            except Exception:
+                pass
+
+        # Local dev: Azure CLI
+        az = shutil.which("az") or shutil.which("az.cmd")
+        if not az:
+            raise RuntimeError(
+                "No auth available. Run inside Azure with a Managed Identity, "
+                "or install Azure CLI locally and run `az login`."
             )
-        return self._pool
+        out = subprocess.run(
+            [az, "account", "get-access-token", "--resource", _RESOURCE, "--output", "json"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode != 0:
+            raise RuntimeError(f"az get-access-token failed: {out.stderr.strip()}")
+        data = json.loads(out.stdout)
+        self._cached_token = data["accessToken"]
+        self._cached_expiry = data["expires_on"]
+        return self._cached_token
+
+    def _token_struct(self) -> bytes:
+        token_bytes = self._get_token().encode("UTF-16-LE")
+        return struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+
+    async def _run(self, fn, *args):
+        return await asyncio.get_event_loop().run_in_executor(None, fn, *args)
+
+    def _connect(self) -> pyodbc.Connection:
+        return pyodbc.connect(
+            self._conn_str,
+            timeout=30,
+            attrs_before={_SQL_COPT_SS_ACCESS_TOKEN: self._token_struct()},
+        )
+
+    def _fetch_all_sync(self, sql: str, params: tuple) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                if cur.description is None:
+                    return []
+                columns = [col[0] for col in cur.description]
+                return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def _execute_sync(self, sql: str, params: tuple) -> int:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                conn.commit()
+                return cur.rowcount
 
     async def fetch_all(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+        # Retry once on transient errors (40613 = DB paused/waking, HYT00 = login timeout)
         for attempt in range(2):
             try:
-                pool = await self._get_pool()
-                async with pool.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute(sql, params)
-                        columns = [col[0] for col in cur.description]
-                        rows = await cur.fetchall()
-                        return [dict(zip(columns, row)) for row in rows]
+                return await self._run(self._fetch_all_sync, sql, params)
             except Exception as exc:
-                if attempt == 0 and self._pool is not None:
-                    self._pool.close()
-                    self._pool = None
-                else:
-                    raise
+                msg = str(exc)
+                transient = "40613" in msg or "HYT00" in msg or "40615" in msg
+                if attempt == 0 and transient:
+                    await asyncio.sleep(2)
+                    continue
+                raise
 
     async def fetch_one(self, sql: str, params: tuple = ()) -> Optional[Dict[str, Any]]:
         results = await self.fetch_all(sql, params)
         return results[0] if results else None
 
     async def execute(self, sql: str, params: tuple = ()) -> int:
-        pool = await self._get_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(sql, params)
-                await conn.commit()
-                return cur.rowcount
+        return await self._run(self._execute_sync, sql, params)
 
     async def ping(self) -> bool:
         try:
@@ -64,29 +125,21 @@ class SQLService:
             return False
 
     async def close(self):
-        if self._pool:
-            self._pool.close()
-            await self._pool.wait_closed()
+        # No persistent pool to close — connections are opened per query
+        pass
 
     async def get_schema_context(self) -> str:
         from datetime import date
         today = date.today().strftime("%Y-%m-%d")
         return f"""
-Tables in the database:
+Local table (portfolios only — all initiative data lives in the external view):
 
-1. portfolios
-   Columns: id, portfolio, portfolio_lead, uk_lead, ai_scout
-   Description: AI portfolio areas and their leads. ai_scout is an email address.
+portfolios
+  Columns: id, portfolio, portfolio_lead, uk_lead, ai_scout
+  Description: AI portfolio areas and their leads. ai_scout is an email address.
+  Use this table ONLY for "who is X?" / "who leads X?" questions about portfolio leadership.
 
-2. ai_initiatives
-   Columns: item_id, initiative_name, portfolio_team, owner, last_updated, stage, confirmed_scout
-   stage values: Proposed, Live, PoC/Pilot, On Hold, Completed, Blocked, In Progress, Reframed, Stopped
-   portfolio_team references the portfolio column in the portfolios table.
-   owner can contain multiple names separated by commas.
-   last_updated is stored as YYYY-MM text (e.g. '2026-04' = April 2026, '2024-10' = October 2024).
-   Use plain string comparison for date filters: last_updated < '2026-04-01' or last_updated >= '2025-10-01'.
-   Empty string means no date recorded.
-   Today's date is {today}.
+Today's date is {today}.
 """
 
     async def get_initiatives_summary(self) -> Dict[str, Any]:

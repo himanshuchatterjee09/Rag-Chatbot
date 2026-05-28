@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .models import HealthResponse, IndexRequest, QueryRequest, QueryResponse
+from .services.document_ingestion import DocumentIngestion
+from .services.external_view_service import ExternalViewService
 from .services.intent_router import IntentRouter
 from .services.search_service import SearchService
 from .services.sql_service import SQLService
@@ -21,7 +23,20 @@ async def lifespan(app: FastAPI):
     app.state.router = IntentRouter(settings)
     app.state.search = SearchService(settings)
     app.state.sql = SQLService(settings)
+    app.state.view = ExternalViewService(settings)
     await app.state.search.ensure_index_exists()
+
+    # Auto-ingest any PDFs dropped into the docs folder on startup.
+    # DOCS_DIR env var lets Azure point to the mounted file share at /mnt/docs.
+    docs_dir = os.environ.get(
+        "DOCS_DIR",
+        os.path.join(os.path.dirname(__file__), "..", "docs"),
+    )
+    try:
+        await DocumentIngestion(settings, docs_dir).ingest_all()
+    except Exception as exc:
+        print(f"[DOC] startup ingestion failed: {exc}")
+
     yield
     await app.state.sql.close()
 
@@ -69,8 +84,11 @@ async def query(request: QueryRequest):
 @app.post("/api/query/stream")
 async def query_stream(request: QueryRequest):
     async def generate():
-        async for chunk in app.state.router.route_stream(request):
-            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+        async for event in app.state.router.route_stream(request):
+            if event.get("type") == "chunk":
+                yield f"data: {json.dumps({'chunk': event['text']})}\n\n"
+            elif event.get("type") == "meta":
+                yield f"data: {json.dumps({'meta': event}, default=str)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -89,25 +107,60 @@ async def index_data(request: IndexRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/api/index/docs")
+async def index_docs():
+    """Re-scan the docs folder (mounted volume in Azure, local folder in dev)
+    and re-index any PDFs found."""
+    settings = get_settings()
+    docs_dir = os.environ.get(
+        "DOCS_DIR",
+        os.path.join(os.path.dirname(__file__), "..", "docs"),
+    )
+    try:
+        count = await DocumentIngestion(settings, docs_dir).ingest_all()
+        return {"indexed_chunks": count, "docs_dir": docs_dir}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/initiatives/summary")
 async def initiatives_summary():
-    return await app.state.sql.get_initiatives_summary()
+    view = f"{app.state.view.view}"
+    totals = await app.state.view.fetch_all(f"""
+        SELECT
+            COUNT(DISTINCT Initiative_ID) AS total,
+            COUNT(DISTINCT CASE WHEN Stage='Live'        THEN Initiative_ID END) AS live,
+            COUNT(DISTINCT CASE WHEN Stage='Completed'   THEN Initiative_ID END) AS completed,
+            COUNT(DISTINCT CASE WHEN Stage='Proposed'    THEN Initiative_ID END) AS proposed,
+            COUNT(DISTINCT CASE WHEN Stage='On Hold'     THEN Initiative_ID END) AS on_hold,
+            COUNT(DISTINCT CASE WHEN Stage='In Progress' THEN Initiative_ID END) AS in_progress,
+            COUNT(DISTINCT CASE WHEN Stage='PoC/Pilot'   THEN Initiative_ID END) AS poc_pilot,
+            COUNT(DISTINCT CASE WHEN Stage='Blocked'     THEN Initiative_ID END) AS blocked
+        FROM {view}
+    """)
+    by_portfolio = await app.state.view.fetch_all(f"""
+        SELECT Portfolio_Label AS portfolio_team, COUNT(DISTINCT Initiative_ID) AS count
+        FROM {view}
+        GROUP BY Portfolio_Label
+        ORDER BY count DESC
+    """)
+    return {"totals": totals[0] if totals else {}, "by_portfolio": by_portfolio}
 
 
 @app.get("/api/initiatives/portfolios")
 async def portfolios():
-    rows = await app.state.sql.fetch_all(
-        "SELECT DISTINCT portfolio_team FROM ai_initiatives "
-        "WHERE portfolio_team IS NOT NULL ORDER BY portfolio_team"
+    rows = await app.state.view.fetch_all(
+        f"SELECT DISTINCT Portfolio_Label FROM {app.state.view.view} "
+        "WHERE Portfolio_Label IS NOT NULL ORDER BY Portfolio_Label"
     )
-    return [r["portfolio_team"] for r in rows]
+    return [r["Portfolio_Label"] for r in rows]
 
 
 @app.get("/api/initiatives/stages")
 async def stages():
-    rows = await app.state.sql.fetch_all(
-        "SELECT stage, COUNT(*) AS count FROM ai_initiatives "
-        "WHERE stage IS NOT NULL GROUP BY stage ORDER BY count DESC"
+    rows = await app.state.view.fetch_all(
+        f"SELECT Stage AS stage, COUNT(DISTINCT Initiative_ID) AS count FROM {app.state.view.view} "
+        "WHERE Stage IS NOT NULL GROUP BY Stage ORDER BY count DESC"
     )
     return rows
 
